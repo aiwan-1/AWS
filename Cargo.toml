@@ -1,6 +1,16 @@
 [package]
-name = "hello_world"
+name = "rust_code_editor"
 version = "0.1.0"
 edition = "2021"
+description = "A Visual Studio-esque code editor written in Rust"
+
+[[bin]]
+name = "rust_code_editor"
+path = "src/main.rs"
 
 [dependencies]
+eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui = "0.27"
+egui_extras = { version = "0.27", features = ["syntect"] }
+serde = { version = "1", features = ["derive"] }
+rfd = "0.14"
