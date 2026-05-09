@@ -54,13 +54,15 @@ Status legend: `[x]` done · `[~]` partial · `[ ]` not yet
 - [x] Diagnostics (errors, warnings, info, hints) with Problems panel
 - [x] Server registry: rust-analyzer, pylsp, typescript-language-server, gopls, clangd
 - [x] didOpen / didChange / didSave / didClose lifecycle
+- [x] Format document / format on save (textDocument/formatting)
+- [x] Go to definition (F12)
+- [x] Hover info (Ctrl+Shift+I — popup window)
 - [ ] Autocomplete / IntelliSense
-- [ ] Hover info / signature help
+- [ ] Signature help
 - [ ] Quick fixes / code actions
 - [ ] Refactoring (rename symbol, extract, etc.)
-- [ ] Format document / format on save
 - [ ] Snippets
-- [ ] Go to definition / references
+- [ ] Find references
 
 ## Search
 - [x] Find / replace in current file (Ctrl+F / Ctrl+H)

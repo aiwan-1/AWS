@@ -7,7 +7,7 @@ use crate::editor::EditorView;
 use crate::explorer::FileExplorer;
 use crate::find::{self, FindAction, FindState};
 use crate::git::GitRepo;
-use crate::lsp::LspManager;
+use crate::lsp::{self, LspEvent, LspManager};
 use crate::problems::{self, ProblemAction};
 use crate::scm::{ScmAction, ScmState};
 use crate::search::{self, SearchAction, SearchState};
@@ -36,6 +36,9 @@ pub struct CodeEditorApp {
     pub find: FindState,
     pub show_find_bar: bool,
     pub search: SearchState,
+    pub format_on_save: bool,
+    pub hover_open: bool,
+    pub hover_text: String,
 }
 
 impl CodeEditorApp {
@@ -56,6 +59,9 @@ impl CodeEditorApp {
             find: FindState::default(),
             show_find_bar: false,
             search: SearchState::default(),
+            format_on_save: true,
+            hover_open: false,
+            hover_text: String::new(),
         };
         if let Ok(cwd) = std::env::current_dir() {
             app.lsp.set_workspace_root(cwd.clone());
@@ -115,7 +121,96 @@ impl CodeEditorApp {
             if self.show_find_bar && i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.show_find_bar = false;
             }
+            if i.consume_key(Modifiers::NONE, Key::F12) {
+                self.action_goto_definition();
+            }
+            if i.consume_key(ctrl | Modifiers::SHIFT, Key::I) {
+                self.action_show_hover();
+            }
         });
+    }
+
+    pub fn action_goto_definition(&mut self) {
+        let Some(file) = self.tabs.active() else {
+            return;
+        };
+        let Some(path) = file.path.clone() else {
+            return;
+        };
+        let line = file.cursor_line as u32;
+        let character = file.cursor_col as u32;
+        self.lsp.request_definition(&path, line, character);
+        self.status_message = "Looking up definition…".into();
+    }
+
+    pub fn action_show_hover(&mut self) {
+        let Some(file) = self.tabs.active() else {
+            return;
+        };
+        let Some(path) = file.path.clone() else {
+            return;
+        };
+        let line = file.cursor_line as u32;
+        let character = file.cursor_col as u32;
+        self.lsp.request_hover(&path, line, character);
+        self.status_message = "Fetching hover…".into();
+    }
+
+    fn handle_lsp_events(&mut self, events: Vec<LspEvent>) {
+        for event in events {
+            match event {
+                LspEvent::Diagnostics(_, _) => {
+                    // Already cached by LspManager.poll
+                }
+                LspEvent::FormatEdits {
+                    uri,
+                    version,
+                    edits,
+                } => {
+                    let Ok(path) = uri.to_file_path() else {
+                        continue;
+                    };
+                    let Some(file) = self
+                        .tabs
+                        .files
+                        .iter_mut()
+                        .find(|f| f.path.as_deref() == Some(path.as_path()))
+                    else {
+                        continue;
+                    };
+                    if file.content_version != version {
+                        // File edited since the request; skip stale edits.
+                        continue;
+                    }
+                    let new_content = lsp::apply_text_edits(&file.content, &edits);
+                    if new_content != file.content {
+                        file.content = new_content;
+                        file.content_version = file.content_version.wrapping_add(1);
+                        // Persist the formatted output.
+                        if let Some(p) = &file.path {
+                            let p = p.clone();
+                            let content = file.content.clone();
+                            if std::fs::write(&p, &content).is_ok() {
+                                file.on_disk = content.clone();
+                                self.lsp.save_doc(&p, &content);
+                                self.status_message = format!("Formatted {}", p.display());
+                            }
+                        }
+                    }
+                }
+                LspEvent::Definition(loc) => {
+                    if let Ok(path) = loc.uri.to_file_path() {
+                        let line = loc.range.start.line + 1;
+                        self.jump_to(path, line);
+                    }
+                }
+                LspEvent::Hover { text } => {
+                    self.hover_text = text;
+                    self.hover_open = true;
+                    self.status_message = "Hover ready".into();
+                }
+            }
+        }
     }
 
     pub fn action_new_file(&mut self) {
@@ -147,7 +242,11 @@ impl CodeEditorApp {
                 self.status_message = format!("Saved {}", path.display());
                 if let Some(file) = self.tabs.active() {
                     let content = file.content.clone();
+                    let version = file.content_version;
                     self.lsp.save_doc(&path, &content);
+                    if self.format_on_save {
+                        self.lsp.request_format(&path, version);
+                    }
                 }
             }
             Ok(None) => self.action_save_as(),
@@ -566,7 +665,8 @@ impl CodeEditorApp {
 impl eframe::App for CodeEditorApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.handle_shortcuts(ctx);
-        self.lsp.poll();
+        let events = self.lsp.poll();
+        self.handle_lsp_events(events);
         self.sync_lsp_documents();
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
@@ -651,6 +751,23 @@ impl eframe::App for CodeEditorApp {
                         self.show_side_panel = true;
                         self.side_view = SidePanelView::Search;
                         self.search.focus_query = true;
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Code", |ui| {
+                    if ui.button("Go to Definition  F12").clicked() {
+                        self.action_goto_definition();
+                        ui.close_menu();
+                    }
+                    if ui.button("Show Hover  Ctrl+Shift+I").clicked() {
+                        self.action_show_hover();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .checkbox(&mut self.format_on_save, "Format on Save")
+                        .clicked()
+                    {
                         ui.close_menu();
                     }
                 });
@@ -784,6 +901,22 @@ impl eframe::App for CodeEditorApp {
                         });
                 });
             self.blame_open = open;
+        }
+
+        if self.hover_open {
+            let mut open = true;
+            egui::Window::new("Hover")
+                .open(&mut open)
+                .default_size([520.0, 320.0])
+                .resizable(true)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(&self.hover_text).monospace());
+                        });
+                });
+            self.hover_open = open;
         }
     }
 }
