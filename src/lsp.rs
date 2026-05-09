@@ -6,14 +6,18 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+pub use lsp_types::CompletionItem;
+
 use lsp_types::{
-    ClientCapabilities, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    ClientCapabilities, CompletionContext, CompletionParams, CompletionResponse,
+    CompletionTriggerKind, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
     FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
     HoverParams, InitializeParams, InitializedParams, Location, MarkedString, PartialResultParams,
-    Position, PublishDiagnosticsParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, TextEdit, VersionedTextDocumentIdentifier,
-    WorkDoneProgressParams, WorkspaceFolder,
+    Position, PublishDiagnosticsParams, SignatureHelp, SignatureHelpParams,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextEdit, VersionedTextDocumentIdentifier, WorkDoneProgressParams,
+    WorkspaceFolder,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -88,6 +92,8 @@ enum PendingKind {
     Format { uri: Url, version: u32 },
     Definition,
     Hover,
+    Completion { invocation_id: u64 },
+    SignatureHelp,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +108,11 @@ pub enum LspEvent {
     Hover {
         text: String,
     },
+    Completion {
+        invocation_id: u64,
+        items: Vec<CompletionItem>,
+    },
+    SignatureHelp(SignatureHelp),
 }
 
 pub struct LspClient {
@@ -254,6 +265,33 @@ impl LspClient {
                                 }
                             }
                         }
+                        Some(PendingKind::Completion { invocation_id }) => {
+                            if let Some(value) = result {
+                                if let Ok(Some(resp)) =
+                                    serde_json::from_value::<Option<CompletionResponse>>(value)
+                                {
+                                    let items = match resp {
+                                        CompletionResponse::Array(v) => v,
+                                        CompletionResponse::List(l) => l.items,
+                                    };
+                                    events.push(LspEvent::Completion {
+                                        invocation_id,
+                                        items,
+                                    });
+                                }
+                            }
+                        }
+                        Some(PendingKind::SignatureHelp) => {
+                            if let Some(value) = result {
+                                if let Ok(Some(help)) =
+                                    serde_json::from_value::<Option<SignatureHelp>>(value)
+                                {
+                                    if !help.signatures.is_empty() {
+                                        events.push(LspEvent::SignatureHelp(help));
+                                    }
+                                }
+                            }
+                        }
                         None => {}
                     }
                 }
@@ -328,6 +366,53 @@ impl LspClient {
         let id = self.next_id();
         self.pending.insert(id, PendingKind::Hover);
         let _ = send_request(&self.writer, id, "textDocument/hover", &params);
+    }
+
+    pub fn request_completion(
+        &mut self,
+        uri: Url,
+        line: u32,
+        character: u32,
+        trigger: Option<char>,
+        invocation_id: u64,
+    ) {
+        if !self.initialized || !self.open_docs.contains_key(&uri) {
+            return;
+        }
+        let context = trigger.map(|c| CompletionContext {
+            trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+            trigger_character: Some(c.to_string()),
+        });
+        let params = CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line, character },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context,
+        };
+        let id = self.next_id();
+        self.pending
+            .insert(id, PendingKind::Completion { invocation_id });
+        let _ = send_request(&self.writer, id, "textDocument/completion", &params);
+    }
+
+    pub fn request_signature_help(&mut self, uri: Url, line: u32, character: u32) {
+        if !self.initialized || !self.open_docs.contains_key(&uri) {
+            return;
+        }
+        let params = SignatureHelpParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position { line, character },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            context: None,
+        };
+        let id = self.next_id();
+        self.pending.insert(id, PendingKind::SignatureHelp);
+        let _ = send_request(&self.writer, id, "textDocument/signatureHelp", &params);
     }
 
     pub fn did_open(&mut self, uri: Url, content: &str) {
@@ -602,6 +687,31 @@ impl LspManager {
         }
     }
 
+    pub fn request_completion(
+        &mut self,
+        path: &Path,
+        line: u32,
+        character: u32,
+        trigger: Option<char>,
+        invocation_id: u64,
+    ) {
+        let Some((uri, lang)) = self.uri_and_lang_for(path) else {
+            return;
+        };
+        if let Some(client) = self.servers.get_mut(&lang) {
+            client.request_completion(uri, line, character, trigger, invocation_id);
+        }
+    }
+
+    pub fn request_signature_help(&mut self, path: &Path, line: u32, character: u32) {
+        let Some((uri, lang)) = self.uri_and_lang_for(path) else {
+            return;
+        };
+        if let Some(client) = self.servers.get_mut(&lang) {
+            client.request_signature_help(uri, line, character);
+        }
+    }
+
     fn uri_and_lang_for(&self, path: &Path) -> Option<(Url, String)> {
         let ext = path.extension().and_then(|s| s.to_str())?;
         let lang = self.language_for_extension(ext)?;
@@ -735,6 +845,28 @@ pub fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
         }
     }
     result
+}
+
+pub fn position_to_char_idx(content: &str, pos: Position) -> usize {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    let mut idx = 0usize;
+    for ch in content.chars() {
+        if line == pos.line && col == pos.character {
+            return idx;
+        }
+        if ch == '\n' {
+            if line == pos.line {
+                return idx;
+            }
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+        idx += 1;
+    }
+    idx
 }
 
 fn position_to_byte(content: &str, pos: Position) -> usize {

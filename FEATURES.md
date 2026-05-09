@@ -57,8 +57,8 @@ Status legend: `[x]` done · `[~]` partial · `[ ]` not yet
 - [x] Format document / format on save (textDocument/formatting)
 - [x] Go to definition (F12)
 - [x] Hover info (Ctrl+Shift+I — popup window)
-- [ ] Autocomplete / IntelliSense
-- [ ] Signature help
+- [x] Autocomplete (Ctrl+Space, auto-trigger on `.`/`:`, filter as you type)
+- [x] Signature help (Ctrl+Shift+Space, auto-trigger on `(`/`,`)
 - [ ] Quick fixes / code actions
 - [ ] Refactoring (rename symbol, extract, etc.)
 - [ ] Snippets

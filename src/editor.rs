@@ -39,6 +39,15 @@ impl EditorView {
 
                 if response.changed() {
                     file.content_version = file.content_version.wrapping_add(1);
+                    let typed = ui.input(|i| {
+                        i.events.iter().rev().find_map(|e| match e {
+                            egui::Event::Text(t) => t.chars().last(),
+                            _ => None,
+                        })
+                    });
+                    file.last_typed_char = typed;
+                } else {
+                    file.last_typed_char = None;
                 }
 
                 if let Some(target_line) = file.goto_line.take() {
@@ -90,6 +99,17 @@ impl EditorView {
                         }
                     }
                 }
+
+                let row_height = ui.text_style_height(&TextStyle::Monospace);
+                let glyph_width =
+                    ui.fonts(|f| f.glyph_width(&TextStyle::Monospace.resolve(ui.style()), 'm'));
+                let origin = response.rect.left_top();
+                let pos = origin
+                    + egui::vec2(
+                        file.cursor_col as f32 * glyph_width,
+                        (file.cursor_line as f32 + 1.2) * row_height,
+                    );
+                file.cursor_screen_pos = Some(pos);
             });
 
         // Encourage a readable monospace size for the code area.

@@ -19,6 +19,8 @@ pub struct OpenFile {
     pub lsp_known_path: Option<PathBuf>,
     pub goto_line: Option<u32>,
     pub goto_range: Option<(usize, usize)>,
+    pub cursor_screen_pos: Option<egui::Pos2>,
+    pub last_typed_char: Option<char>,
 }
 
 impl OpenFile {
@@ -38,6 +40,8 @@ impl OpenFile {
             lsp_known_path: None,
             goto_line: None,
             goto_range: None,
+            cursor_screen_pos: None,
+            last_typed_char: None,
         }
     }
 
@@ -63,6 +67,8 @@ impl OpenFile {
             lsp_known_path: None,
             goto_line: None,
             goto_range: None,
+            cursor_screen_pos: None,
+            last_typed_char: None,
         })
     }
 

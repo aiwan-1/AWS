@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use eframe::CreationContext;
 use egui::{Context, Key, Modifiers};
 
+use crate::completion::{CompletionAction, CompletionState, SignatureHelpState};
 use crate::editor::EditorView;
 use crate::explorer::FileExplorer;
 use crate::find::{self, FindAction, FindState};
@@ -39,6 +40,8 @@ pub struct CodeEditorApp {
     pub format_on_save: bool,
     pub hover_open: bool,
     pub hover_text: String,
+    pub completion: CompletionState,
+    pub sig_help: SignatureHelpState,
 }
 
 impl CodeEditorApp {
@@ -62,6 +65,8 @@ impl CodeEditorApp {
             format_on_save: true,
             hover_open: false,
             hover_text: String::new(),
+            completion: CompletionState::default(),
+            sig_help: SignatureHelpState::default(),
         };
         if let Ok(cwd) = std::env::current_dir() {
             app.lsp.set_workspace_root(cwd.clone());
@@ -127,7 +132,90 @@ impl CodeEditorApp {
             if i.consume_key(ctrl | Modifiers::SHIFT, Key::I) {
                 self.action_show_hover();
             }
+            if i.consume_key(ctrl, Key::Space) {
+                self.action_trigger_completion(None);
+            }
+            if i.consume_key(ctrl | Modifiers::SHIFT, Key::Space) {
+                self.action_trigger_signature_help();
+            }
         });
+    }
+
+    pub fn action_trigger_completion(&mut self, trigger: Option<char>) {
+        let Some(file) = self.tabs.active() else {
+            return;
+        };
+        let Some(path) = file.path.clone() else {
+            return;
+        };
+        let line = file.cursor_line as u32;
+        let character = file.cursor_col as u32;
+        let invocation = self.completion.next_invocation();
+        self.completion.invoked_at = Some(lsp_types::Position { line, character });
+        self.completion.anchor = file.cursor_screen_pos;
+        self.completion.typed_prefix.clear();
+        self.lsp
+            .request_completion(&path, line, character, trigger, invocation);
+    }
+
+    pub fn action_trigger_signature_help(&mut self) {
+        let Some(file) = self.tabs.active() else {
+            return;
+        };
+        let Some(path) = file.path.clone() else {
+            return;
+        };
+        let line = file.cursor_line as u32;
+        let character = file.cursor_col as u32;
+        self.lsp.request_signature_help(&path, line, character);
+    }
+
+    fn maybe_auto_trigger(&mut self) {
+        let Some(file) = self.tabs.active() else {
+            return;
+        };
+        let Some(c) = file.last_typed_char else {
+            return;
+        };
+        if file.path.is_none() {
+            return;
+        }
+        match c {
+            '.' | ':' => self.action_trigger_completion(Some(c)),
+            '(' | ',' => self.action_trigger_signature_help(),
+            _ => {
+                if self.completion.open && (c.is_alphanumeric() || c == '_') {
+                    self.completion.typed_prefix.push(c);
+                    self.completion.refilter();
+                }
+            }
+        }
+    }
+
+    fn apply_completion_item(&mut self, item: lsp::CompletionItem) {
+        let Some(file) = self.tabs.active_mut() else {
+            return;
+        };
+        let prefix_len = self.completion.typed_prefix.chars().count();
+        let (insert_text, replace_start, replace_end) = crate::completion::resolve_insertion(
+            &item,
+            &file.content,
+            file.cursor_char,
+            prefix_len,
+        );
+        let start_byte = find::char_to_byte(&file.content, replace_start);
+        let end_byte = find::char_to_byte(&file.content, replace_end);
+        let mut new_content = String::with_capacity(file.content.len() + insert_text.len());
+        new_content.push_str(&file.content[..start_byte]);
+        new_content.push_str(&insert_text);
+        new_content.push_str(&file.content[end_byte..]);
+        file.content = new_content;
+        file.content_version = file.content_version.wrapping_add(1);
+        let new_cursor = replace_start + insert_text.chars().count();
+        file.cursor_char = new_cursor;
+        file.cursor_anchor = new_cursor;
+        file.goto_range = Some((new_cursor, new_cursor));
+        self.completion.close();
     }
 
     pub fn action_goto_definition(&mut self) {
@@ -208,6 +296,21 @@ impl CodeEditorApp {
                     self.hover_text = text;
                     self.hover_open = true;
                     self.status_message = "Hover ready".into();
+                }
+                LspEvent::Completion {
+                    invocation_id,
+                    items,
+                } => {
+                    if invocation_id == self.completion.invocation_id {
+                        let prefix = self.completion.typed_prefix.clone();
+                        self.completion.set_items(items, &prefix);
+                        if let Some(file) = self.tabs.active() {
+                            self.completion.anchor = file.cursor_screen_pos;
+                        }
+                    }
+                }
+                LspEvent::SignatureHelp(help) => {
+                    self.sig_help.set(help);
                 }
             }
         }
@@ -667,6 +770,7 @@ impl eframe::App for CodeEditorApp {
         self.handle_shortcuts(ctx);
         let events = self.lsp.poll();
         self.handle_lsp_events(events);
+        self.maybe_auto_trigger();
         self.sync_lsp_documents();
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
@@ -755,6 +859,14 @@ impl eframe::App for CodeEditorApp {
                     }
                 });
                 ui.menu_button("Code", |ui| {
+                    if ui.button("Trigger Completion  Ctrl+Space").clicked() {
+                        self.action_trigger_completion(None);
+                        ui.close_menu();
+                    }
+                    if ui.button("Signature Help  Ctrl+Shift+Space").clicked() {
+                        self.action_trigger_signature_help();
+                        ui.close_menu();
+                    }
                     if ui.button("Go to Definition  F12").clicked() {
                         self.action_goto_definition();
                         ui.close_menu();
@@ -917,6 +1029,15 @@ impl eframe::App for CodeEditorApp {
                         });
                 });
             self.hover_open = open;
+        }
+
+        self.sig_help.show(ctx);
+
+        if let Some(action) = self.completion.show(ctx) {
+            match action {
+                CompletionAction::Accept(item) => self.apply_completion_item(*item),
+                CompletionAction::Cancel => self.completion.close(),
+            }
         }
     }
 }
