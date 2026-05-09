@@ -96,7 +96,9 @@ impl TabBar {
     }
 
     pub fn close_active(&mut self) {
-        let Some(idx) = self.active else { return; };
+        let Some(idx) = self.active else {
+            return;
+        };
         self.files.remove(idx);
         if self.files.is_empty() {
             self.active = None;

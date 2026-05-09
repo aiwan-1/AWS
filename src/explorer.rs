@@ -47,13 +47,7 @@ impl FileExplorer {
         to_open
     }
 
-    fn render_dir(
-        &mut self,
-        ui: &mut Ui,
-        dir: &Path,
-        to_open: &mut Option<PathBuf>,
-        depth: usize,
-    ) {
+    fn render_dir(&mut self, ui: &mut Ui, dir: &Path, to_open: &mut Option<PathBuf>, depth: usize) {
         let entries = match read_sorted(dir) {
             Ok(e) => e,
             Err(e) => {
@@ -64,10 +58,7 @@ impl FileExplorer {
 
         for entry in entries {
             let path = entry.path();
-            let name = entry
-                .file_name()
-                .to_string_lossy()
-                .into_owned();
+            let name = entry.file_name().to_string_lossy().into_owned();
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
             ui.horizontal(|ui| {
