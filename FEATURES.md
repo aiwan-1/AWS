@@ -71,10 +71,11 @@ Status legend: `[x]` done · `[~]` partial · `[ ]` not yet
 - [x] Diff view (unified, inline in panel)
 - [x] Push / pull / fetch (via system git)
 - [x] Discard changes
-- [ ] Status indicators in gutter
-- [ ] Branch switcher / create branch
-- [ ] Merge conflict UI
-- [ ] Blame / history
+- [x] Branch switcher / create branch
+- [x] Merge conflict UI (use ours / theirs / mark resolved)
+- [x] Blame (popup window for active file)
+- [x] History (recent commits in panel)
+- [ ] Status indicators in gutter (deferred — bundling with LSP gutter)
 
 ## Terminal & Tasks
 - [ ] Integrated terminal (PTY)

@@ -1,11 +1,15 @@
 use egui::{Color32, RichText, TextStyle, Ui};
 
-use crate::git::{Change, GitRepo, StatusEntry};
+use crate::git::{Change, CommitInfo, GitRepo, StatusEntry};
 
 #[derive(Default)]
 pub struct ScmState {
     pub commit_message: String,
     pub statuses: Vec<StatusEntry>,
+    pub branches: Vec<String>,
+    pub commits: Vec<CommitInfo>,
+    pub current_branch: String,
+    pub new_branch_name: String,
     pub last_error: Option<String>,
     pub last_info: Option<String>,
     pub selected: Option<(String, bool)>,
@@ -22,6 +26,12 @@ pub enum ScmAction {
     Push,
     Pull,
     Fetch,
+    CheckoutBranch(String),
+    CreateBranch(String),
+    ResolveOurs(String),
+    ResolveTheirs(String),
+    MarkResolved(String),
+    BlameActive,
 }
 
 impl ScmState {
@@ -65,6 +75,13 @@ impl ScmState {
             if ui.button("↻ Fetch").clicked() {
                 action = Some(ScmAction::Fetch);
             }
+            if ui
+                .button("👁 Blame")
+                .on_hover_text("Blame the active file")
+                .clicked()
+            {
+                action = Some(ScmAction::BlameActive);
+            }
         });
 
         if let Some(err) = &self.last_error {
@@ -79,10 +96,18 @@ impl ScmState {
         ui.separator();
 
         let staged: Vec<StatusEntry> = self.statuses.iter().filter(|s| s.staged).cloned().collect();
+        let conflicted: Vec<StatusEntry> = self
+            .statuses
+            .iter()
+            .filter(|s| s.change == Change::Conflicted)
+            .cloned()
+            .collect();
         let unstaged: Vec<StatusEntry> = self
             .statuses
             .iter()
-            .filter(|s| !s.staged && s.change != Change::Untracked)
+            .filter(|s| {
+                !s.staged && s.change != Change::Untracked && s.change != Change::Conflicted
+            })
             .cloned()
             .collect();
         let untracked: Vec<StatusEntry> = self
@@ -96,9 +121,20 @@ impl ScmState {
 
         egui::ScrollArea::vertical()
             .id_source("scm_files")
-            .max_height(ui.available_height() * 0.55)
+            .max_height(ui.available_height() * 0.5)
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                if !conflicted.is_empty() {
+                    ui.collapsing(
+                        RichText::new(format!("Merge Conflicts ({})", conflicted.len()))
+                            .color(Color32::from_rgb(255, 120, 120)),
+                        |ui| {
+                            for entry in &conflicted {
+                                render_conflict_entry(ui, entry, &mut action);
+                            }
+                        },
+                    );
+                }
                 if !staged.is_empty() {
                     ui.collapsing(format!("Staged ({})", staged.len()), |ui| {
                         for entry in &staged {
@@ -120,9 +156,74 @@ impl ScmState {
                         }
                     });
                 }
-                if staged.is_empty() && unstaged.is_empty() && untracked.is_empty() {
+                if staged.is_empty()
+                    && unstaged.is_empty()
+                    && untracked.is_empty()
+                    && conflicted.is_empty()
+                {
                     ui.label(RichText::new("No changes.").italics());
                 }
+
+                ui.separator();
+                ui.collapsing(format!("Branches ({})", self.branches.len()), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_branch_name)
+                                .hint_text("new-branch-name")
+                                .desired_width(140.0),
+                        );
+                        if ui.button("+ Create").clicked() {
+                            let name = self.new_branch_name.trim().to_string();
+                            if !name.is_empty() {
+                                action = Some(ScmAction::CreateBranch(name));
+                            }
+                        }
+                    });
+                    ui.separator();
+                    for name in &self.branches {
+                        let is_current = name == &self.current_branch;
+                        ui.horizontal(|ui| {
+                            let label = if is_current {
+                                RichText::new(format!("● {name}"))
+                                    .strong()
+                                    .color(Color32::WHITE)
+                            } else {
+                                RichText::new(format!("  {name}"))
+                            };
+                            if ui
+                                .selectable_label(is_current, label)
+                                .on_hover_text(if is_current {
+                                    "Current branch"
+                                } else {
+                                    "Click to checkout"
+                                })
+                                .clicked()
+                                && !is_current
+                            {
+                                action = Some(ScmAction::CheckoutBranch(name.clone()));
+                            }
+                        });
+                    }
+                });
+
+                ui.separator();
+                ui.collapsing(format!("Recent Commits ({})", self.commits.len()), |ui| {
+                    for c in &self.commits {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(&c.oid_short)
+                                    .monospace()
+                                    .color(Color32::LIGHT_BLUE),
+                            );
+                            ui.label(RichText::new(&c.summary));
+                        });
+                        ui.label(
+                            RichText::new(format!("    {} · {}", c.author, c.time))
+                                .small()
+                                .color(Color32::GRAY),
+                        );
+                    }
+                });
             });
 
         if let Some((path, staged_sel)) = &self.selected {
@@ -191,6 +292,37 @@ fn render_entry(
                 }
             }
         });
+    });
+}
+
+fn render_conflict_entry(ui: &mut Ui, entry: &StatusEntry, action: &mut Option<ScmAction>) {
+    ui.horizontal(|ui| {
+        ui.colored_label(Color32::from_rgb(255, 100, 100), "!");
+        ui.label(RichText::new(&entry.path).color(Color32::from_rgb(255, 200, 200)));
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(20.0);
+        if ui
+            .small_button("Use ours")
+            .on_hover_text("Keep our version, stage")
+            .clicked()
+        {
+            *action = Some(ScmAction::ResolveOurs(entry.path.clone()));
+        }
+        if ui
+            .small_button("Use theirs")
+            .on_hover_text("Take their version, stage")
+            .clicked()
+        {
+            *action = Some(ScmAction::ResolveTheirs(entry.path.clone()));
+        }
+        if ui
+            .small_button("Mark resolved")
+            .on_hover_text("Stage as-is")
+            .clicked()
+        {
+            *action = Some(ScmAction::MarkResolved(entry.path.clone()));
+        }
     });
 }
 

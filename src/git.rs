@@ -48,6 +48,10 @@ impl GitRepo {
         Some(Self { repo, workdir })
     }
 
+    pub fn workdir(&self) -> &Path {
+        &self.workdir
+    }
+
     pub fn current_branch(&self) -> String {
         match self.repo.head() {
             Ok(head) => {
@@ -233,4 +237,76 @@ impl GitRepo {
     pub fn push(&self) -> Result<String, String> {
         self.shell_git(&["push"])
     }
+
+    pub fn local_branches(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(branches) = self.repo.branches(Some(git2::BranchType::Local)) {
+            for (branch, _) in branches.flatten() {
+                if let Ok(Some(name)) = branch.name() {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    pub fn checkout_branch(&self, name: &str) -> Result<String, String> {
+        self.shell_git(&["checkout", name])
+    }
+
+    pub fn create_branch(&self, name: &str) -> Result<String, String> {
+        self.shell_git(&["checkout", "-b", name])
+    }
+
+    pub fn recent_commits(&self, n: usize) -> Vec<CommitInfo> {
+        let n_str = format!("-{n}");
+        let out = self.shell_git(&[
+            "log",
+            &n_str,
+            "--no-decorate",
+            "--pretty=format:%h%x09%an%x09%ar%x09%s",
+        ]);
+        let mut commits = Vec::new();
+        if let Ok(s) = out {
+            for line in s.lines() {
+                let parts: Vec<&str> = line.splitn(4, '\t').collect();
+                if parts.len() == 4 {
+                    commits.push(CommitInfo {
+                        oid_short: parts[0].to_string(),
+                        author: parts[1].to_string(),
+                        time: parts[2].to_string(),
+                        summary: parts[3].to_string(),
+                    });
+                }
+            }
+        }
+        commits
+    }
+
+    pub fn blame(&self, rel_path: &str) -> Result<String, String> {
+        self.shell_git(&["blame", "--date=short", "-w", rel_path])
+    }
+
+    pub fn resolve_ours(&self, path: &str) -> Result<(), String> {
+        self.shell_git(&["checkout", "--ours", "--", path])?;
+        self.shell_git(&["add", "--", path]).map(|_| ())
+    }
+
+    pub fn resolve_theirs(&self, path: &str) -> Result<(), String> {
+        self.shell_git(&["checkout", "--theirs", "--", path])?;
+        self.shell_git(&["add", "--", path]).map(|_| ())
+    }
+
+    pub fn mark_resolved(&self, path: &str) -> Result<(), String> {
+        self.shell_git(&["add", "--", path]).map(|_| ())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CommitInfo {
+    pub oid_short: String,
+    pub author: String,
+    pub time: String,
+    pub summary: String,
 }

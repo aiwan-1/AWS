@@ -23,6 +23,9 @@ pub struct CodeEditorApp {
     pub side_view: SidePanelView,
     pub git: Option<GitRepo>,
     pub scm: ScmState,
+    pub blame_open: bool,
+    pub blame_title: String,
+    pub blame_text: String,
 }
 
 impl CodeEditorApp {
@@ -35,6 +38,9 @@ impl CodeEditorApp {
             side_view: SidePanelView::Explorer,
             git: None,
             scm: ScmState::default(),
+            blame_open: false,
+            blame_title: String::new(),
+            blame_text: String::new(),
         };
         if let Ok(cwd) = std::env::current_dir() {
             app.open_git(&cwd);
@@ -135,6 +141,9 @@ impl CodeEditorApp {
     pub fn refresh_scm(&mut self) {
         let Some(git) = &self.git else {
             self.scm.statuses.clear();
+            self.scm.branches.clear();
+            self.scm.commits.clear();
+            self.scm.current_branch.clear();
             return;
         };
         match git.statuses() {
@@ -144,6 +153,9 @@ impl CodeEditorApp {
             }
             Err(e) => self.scm.last_error = Some(e.to_string()),
         }
+        self.scm.branches = git.local_branches();
+        self.scm.commits = git.recent_commits(20);
+        self.scm.current_branch = git.current_branch();
     }
 
     fn handle_scm_action(&mut self, action: ScmAction) {
@@ -220,6 +232,76 @@ impl CodeEditorApp {
             ScmAction::Push => self.run_remote_op("push"),
             ScmAction::Pull => self.run_remote_op("pull"),
             ScmAction::Fetch => self.run_remote_op("fetch"),
+            ScmAction::CheckoutBranch(name) => match git.checkout_branch(&name) {
+                Ok(_) => {
+                    self.status_message = format!("Checked out {name}");
+                    self.scm.last_info = Some(format!("Now on {name}"));
+                    self.scm.last_error = None;
+                    self.refresh_scm();
+                }
+                Err(e) => self.scm.last_error = Some(e),
+            },
+            ScmAction::CreateBranch(name) => match git.create_branch(&name) {
+                Ok(_) => {
+                    self.status_message = format!("Created and checked out {name}");
+                    self.scm.last_info = Some(format!("Created {name}"));
+                    self.scm.last_error = None;
+                    self.scm.new_branch_name.clear();
+                    self.refresh_scm();
+                }
+                Err(e) => self.scm.last_error = Some(e),
+            },
+            ScmAction::ResolveOurs(p) => {
+                if let Err(e) = git.resolve_ours(&p) {
+                    self.scm.last_error = Some(e);
+                } else {
+                    self.scm.last_info = Some(format!("Resolved {p} (ours)"));
+                    self.scm.last_error = None;
+                }
+                self.refresh_scm();
+            }
+            ScmAction::ResolveTheirs(p) => {
+                if let Err(e) = git.resolve_theirs(&p) {
+                    self.scm.last_error = Some(e);
+                } else {
+                    self.scm.last_info = Some(format!("Resolved {p} (theirs)"));
+                    self.scm.last_error = None;
+                }
+                self.refresh_scm();
+            }
+            ScmAction::MarkResolved(p) => {
+                if let Err(e) = git.mark_resolved(&p) {
+                    self.scm.last_error = Some(e);
+                } else {
+                    self.scm.last_info = Some(format!("Marked resolved: {p}"));
+                    self.scm.last_error = None;
+                }
+                self.refresh_scm();
+            }
+            ScmAction::BlameActive => {
+                let Some(file) = self.tabs.active() else {
+                    self.scm.last_error = Some("No active file.".into());
+                    return;
+                };
+                let Some(path) = file.path.clone() else {
+                    self.scm.last_error = Some("Active file has no saved path.".into());
+                    return;
+                };
+                let workdir = git.workdir().to_path_buf();
+                let rel = match path.strip_prefix(&workdir) {
+                    Ok(r) => r.to_string_lossy().to_string(),
+                    Err(_) => path.display().to_string(),
+                };
+                match git.blame(&rel) {
+                    Ok(text) => {
+                        self.blame_text = text;
+                        self.blame_title = format!("Blame: {rel}");
+                        self.blame_open = true;
+                        self.scm.last_error = None;
+                    }
+                    Err(e) => self.scm.last_error = Some(e),
+                }
+            }
         }
     }
 
@@ -377,5 +459,21 @@ impl eframe::App for CodeEditorApp {
             ui.separator();
             EditorView::show(ui, &mut self.tabs);
         });
+
+        if self.blame_open {
+            let mut open = true;
+            egui::Window::new(&self.blame_title)
+                .open(&mut open)
+                .default_size([900.0, 600.0])
+                .resizable(true)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(&self.blame_text).monospace());
+                        });
+                });
+            self.blame_open = open;
+        }
     }
 }
