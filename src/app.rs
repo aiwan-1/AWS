@@ -5,16 +5,19 @@ use egui::{Context, Key, Modifiers};
 
 use crate::editor::EditorView;
 use crate::explorer::FileExplorer;
+use crate::find::{self, FindAction, FindState};
 use crate::git::GitRepo;
 use crate::lsp::LspManager;
 use crate::problems::{self, ProblemAction};
 use crate::scm::{ScmAction, ScmState};
+use crate::search::{self, SearchAction, SearchState};
 use crate::tabs::{OpenFile, TabBar};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SidePanelView {
     Explorer,
     SourceControl,
+    Search,
 }
 
 pub struct CodeEditorApp {
@@ -30,6 +33,9 @@ pub struct CodeEditorApp {
     pub blame_text: String,
     pub lsp: LspManager,
     pub show_problems: bool,
+    pub find: FindState,
+    pub show_find_bar: bool,
+    pub search: SearchState,
 }
 
 impl CodeEditorApp {
@@ -47,9 +53,13 @@ impl CodeEditorApp {
             blame_text: String::new(),
             lsp: LspManager::new(),
             show_problems: false,
+            find: FindState::default(),
+            show_find_bar: false,
+            search: SearchState::default(),
         };
         if let Ok(cwd) = std::env::current_dir() {
             app.lsp.set_workspace_root(cwd.clone());
+            app.search.root = Some(cwd.clone());
             app.open_git(&cwd);
         }
         app
@@ -87,6 +97,24 @@ impl CodeEditorApp {
             if i.consume_key(ctrl | Modifiers::SHIFT, Key::M) {
                 self.show_problems = !self.show_problems;
             }
+            if i.consume_key(ctrl, Key::F) {
+                self.show_find_bar = true;
+                self.find.show_replace = false;
+                self.find.focus_query = true;
+            }
+            if i.consume_key(ctrl, Key::H) {
+                self.show_find_bar = true;
+                self.find.show_replace = true;
+                self.find.focus_query = true;
+            }
+            if i.consume_key(ctrl | Modifiers::SHIFT, Key::F) {
+                self.show_side_panel = true;
+                self.side_view = SidePanelView::Search;
+                self.search.focus_query = true;
+            }
+            if self.show_find_bar && i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.show_find_bar = false;
+            }
         });
     }
 
@@ -105,6 +133,8 @@ impl CodeEditorApp {
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
             self.explorer.set_root(path.clone());
             self.lsp.set_workspace_root(path.clone());
+            self.search.root = Some(path.clone());
+            self.search.results.clear();
             self.open_git(&path);
             self.status_message = format!("Opened folder {}", path.display());
         }
@@ -197,6 +227,144 @@ impl CodeEditorApp {
             file.goto_line = Some(line);
         }
         self.status_message = format!("{}:{}", path.display(), line);
+    }
+
+    fn jump_to_byte_range(&mut self, path: PathBuf, byte_start: usize, byte_end: usize) {
+        let already_open = self
+            .tabs
+            .files
+            .iter()
+            .position(|f| f.path.as_deref() == Some(path.as_path()));
+        match already_open {
+            Some(idx) => self.tabs.active = Some(idx),
+            None => self.open_path(path.clone()),
+        }
+        if let Some(file) = self.tabs.active_mut() {
+            let start = find::byte_to_char(&file.content, byte_start);
+            let end = find::byte_to_char(&file.content, byte_end);
+            file.goto_range = Some((start, end));
+        }
+    }
+
+    fn handle_find_action(&mut self, action: FindAction) {
+        let Some(file) = self.tabs.active_mut() else {
+            self.find.last_status = "No active file".into();
+            return;
+        };
+        let case = self.find.case_sensitive;
+        match action {
+            FindAction::Close => {
+                self.show_find_bar = false;
+            }
+            FindAction::Next => {
+                if self.find.query.is_empty() {
+                    return;
+                }
+                let from_byte = find::char_to_byte(&file.content, file.cursor_char + 1);
+                if let Some((bs, be)) =
+                    find::find_byte_range(&file.content, &self.find.query, case, from_byte, true)
+                {
+                    let s = find::byte_to_char(&file.content, bs);
+                    let e = find::byte_to_char(&file.content, be);
+                    file.goto_range = Some((s, e));
+                    self.find.last_status = format!("Match @ {s}");
+                } else {
+                    self.find.last_status = "No match".into();
+                }
+            }
+            FindAction::Prev => {
+                if self.find.query.is_empty() {
+                    return;
+                }
+                let cur = file.cursor_char.min(file.cursor_anchor);
+                let from_byte = find::char_to_byte(&file.content, cur);
+                if let Some((bs, be)) =
+                    find::find_byte_range(&file.content, &self.find.query, case, from_byte, false)
+                {
+                    let s = find::byte_to_char(&file.content, bs);
+                    let e = find::byte_to_char(&file.content, be);
+                    file.goto_range = Some((s, e));
+                    self.find.last_status = format!("Match @ {s}");
+                } else {
+                    self.find.last_status = "No match".into();
+                }
+            }
+            FindAction::Replace => {
+                let (sel_start, sel_end) = (
+                    file.cursor_char.min(file.cursor_anchor),
+                    file.cursor_char.max(file.cursor_anchor),
+                );
+                let bs = find::char_to_byte(&file.content, sel_start);
+                let be = find::char_to_byte(&file.content, sel_end);
+                let selected = &file.content[bs..be];
+                let matches = if case {
+                    selected == self.find.query
+                } else {
+                    selected.eq_ignore_ascii_case(&self.find.query)
+                };
+                if matches && !self.find.query.is_empty() {
+                    let new_content = format!(
+                        "{}{}{}",
+                        &file.content[..bs],
+                        &self.find.replacement,
+                        &file.content[be..]
+                    );
+                    file.content = new_content;
+                    file.content_version = file.content_version.wrapping_add(1);
+                    let new_end_char = sel_start + self.find.replacement.chars().count();
+                    file.goto_range = Some((sel_start, new_end_char));
+                    file.cursor_char = new_end_char;
+                    file.cursor_anchor = new_end_char;
+                    self.find.last_status = "Replaced".into();
+                } else {
+                    let from_byte = find::char_to_byte(&file.content, file.cursor_char);
+                    if let Some((nbs, nbe)) = find::find_byte_range(
+                        &file.content,
+                        &self.find.query,
+                        case,
+                        from_byte,
+                        true,
+                    ) {
+                        let s = find::byte_to_char(&file.content, nbs);
+                        let e = find::byte_to_char(&file.content, nbe);
+                        file.goto_range = Some((s, e));
+                        self.find.last_status = "Found next — click Replace again".into();
+                    } else {
+                        self.find.last_status = "No match".into();
+                    }
+                }
+            }
+            FindAction::ReplaceAll => {
+                let (new_content, count) =
+                    find::replace_all(&file.content, &self.find.query, &self.find.replacement);
+                if count > 0 {
+                    file.content = new_content;
+                    file.content_version = file.content_version.wrapping_add(1);
+                }
+                self.find.last_status = format!("Replaced {count} occurrence(s)");
+            }
+        }
+    }
+
+    fn handle_search_action(&mut self, action: SearchAction) {
+        match action {
+            SearchAction::Run => {
+                let Some(root) = self.search.root.clone() else {
+                    self.search.last_status = "No workspace folder set".into();
+                    return;
+                };
+                let started = std::time::Instant::now();
+                let results = search::run_search(&root, &self.search.query, &self.search.options);
+                let elapsed = started.elapsed();
+                self.search.last_status =
+                    format!("{} match(es) in {}ms", results.len(), elapsed.as_millis());
+                self.search.results = results;
+            }
+            SearchAction::Open(path, line, byte_start, byte_end) => {
+                self.jump_to_byte_range(path.clone(), byte_start, byte_end);
+                self.status_message = format!("{}:{}", path.display(), line);
+            }
+        }
     }
 
     pub fn open_git(&mut self, path: &Path) {
@@ -452,11 +620,37 @@ impl eframe::App for CodeEditorApp {
                         self.side_view = SidePanelView::SourceControl;
                         ui.close_menu();
                     }
+                    if ui.button("Search  Ctrl+Shift+F").clicked() {
+                        self.show_side_panel = true;
+                        self.side_view = SidePanelView::Search;
+                        self.search.focus_query = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui
                         .checkbox(&mut self.show_problems, "Problems  Ctrl+Shift+M")
                         .clicked()
                     {
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    if ui.button("Find  Ctrl+F").clicked() {
+                        self.show_find_bar = true;
+                        self.find.show_replace = false;
+                        self.find.focus_query = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Replace  Ctrl+H").clicked() {
+                        self.show_find_bar = true;
+                        self.find.show_replace = true;
+                        self.find.focus_query = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Find in Files  Ctrl+Shift+F").clicked() {
+                        self.show_side_panel = true;
+                        self.side_view = SidePanelView::Search;
+                        self.search.focus_query = true;
                         ui.close_menu();
                     }
                 });
@@ -533,6 +727,13 @@ impl eframe::App for CodeEditorApp {
                             self.side_view = SidePanelView::SourceControl;
                             self.refresh_scm();
                         }
+                        if ui
+                            .selectable_label(self.side_view == SidePanelView::Search, "🔍 Search")
+                            .clicked()
+                        {
+                            self.side_view = SidePanelView::Search;
+                            self.search.focus_query = true;
+                        }
                     });
                     ui.separator();
                     match self.side_view {
@@ -546,15 +747,28 @@ impl eframe::App for CodeEditorApp {
                                 self.handle_scm_action(action);
                             }
                         }
+                        SidePanelView::Search => {
+                            if let Some(action) = self.search.show(ui) {
+                                self.handle_search_action(action);
+                            }
+                        }
                     }
                 });
         }
 
+        let mut find_action: Option<FindAction> = None;
         egui::CentralPanel::default().show(ctx, |ui| {
             self.tabs.show_tab_bar(ui);
             ui.separator();
+            if self.show_find_bar {
+                find_action = self.find.show_bar(ui);
+                ui.separator();
+            }
             EditorView::show(ui, &mut self.tabs);
         });
+        if let Some(action) = find_action {
+            self.handle_find_action(action);
+        }
 
         if self.blame_open {
             let mut open = true;

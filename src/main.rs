@@ -13,10 +13,12 @@
 mod app;
 mod editor;
 mod explorer;
+mod find;
 mod git;
 mod lsp;
 mod problems;
 mod scm;
+mod search;
 mod tabs;
 
 use app::CodeEditorApp;

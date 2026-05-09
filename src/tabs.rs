@@ -12,10 +12,13 @@ pub struct OpenFile {
     pub language: String,
     pub cursor_line: usize,
     pub cursor_col: usize,
+    pub cursor_char: usize,
+    pub cursor_anchor: usize,
     pub content_version: u32,
     pub lsp_synced_version: u32,
     pub lsp_known_path: Option<PathBuf>,
     pub goto_line: Option<u32>,
+    pub goto_range: Option<(usize, usize)>,
 }
 
 impl OpenFile {
@@ -28,10 +31,13 @@ impl OpenFile {
             language: String::from("plain"),
             cursor_line: 0,
             cursor_col: 0,
+            cursor_char: 0,
+            cursor_anchor: 0,
             content_version: 0,
             lsp_synced_version: 0,
             lsp_known_path: None,
             goto_line: None,
+            goto_range: None,
         }
     }
 
@@ -50,10 +56,13 @@ impl OpenFile {
             language,
             cursor_line: 0,
             cursor_col: 0,
+            cursor_char: 0,
+            cursor_anchor: 0,
             content_version: 0,
             lsp_synced_version: 0,
             lsp_known_path: None,
             goto_line: None,
+            goto_range: None,
         })
     }
 

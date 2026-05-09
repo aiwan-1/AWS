@@ -65,11 +65,26 @@ impl EditorView {
                     }
                 }
 
+                if let Some((start_char, end_char)) = file.goto_range.take() {
+                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+                        let start = egui::text::CCursor::new(start_char);
+                        let end = egui::text::CCursor::new(end_char);
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::two(start, end)));
+                        state.store(ui.ctx(), response.id);
+                        response.request_focus();
+                    }
+                }
+
                 if response.has_focus() {
                     if let Some(state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
                         if let Some(range) = state.cursor.char_range() {
-                            let cursor = range.primary.index;
-                            let (line, col) = line_col(&file.content, cursor);
+                            let primary = range.primary.index;
+                            let secondary = range.secondary.index;
+                            file.cursor_char = primary;
+                            file.cursor_anchor = secondary;
+                            let (line, col) = line_col(&file.content, primary);
                             file.cursor_line = line;
                             file.cursor_col = col;
                         }

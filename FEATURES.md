@@ -63,8 +63,9 @@ Status legend: `[x]` done · `[~]` partial · `[ ]` not yet
 - [ ] Go to definition / references
 
 ## Search
-- [ ] Find / replace in current file (with regex)
-- [ ] Find in files panel
+- [x] Find / replace in current file (Ctrl+F / Ctrl+H)
+- [x] Find in files panel (Ctrl+Shift+F) — click result to jump
+- [ ] Regex find/replace
 - [ ] Replace across files with preview
 - [ ] Search history
 
