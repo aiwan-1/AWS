@@ -13,6 +13,7 @@ use crate::problems::{self, ProblemAction};
 use crate::scm::{ScmAction, ScmState};
 use crate::search::{self, SearchAction, SearchState};
 use crate::tabs::{OpenFile, TabBar};
+use crate::terminal::Terminal;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SidePanelView {
@@ -42,6 +43,8 @@ pub struct CodeEditorApp {
     pub hover_text: String,
     pub completion: CompletionState,
     pub sig_help: SignatureHelpState,
+    pub terminal: Option<Terminal>,
+    pub show_terminal: bool,
 }
 
 impl CodeEditorApp {
@@ -67,6 +70,8 @@ impl CodeEditorApp {
             hover_text: String::new(),
             completion: CompletionState::default(),
             sig_help: SignatureHelpState::default(),
+            terminal: None,
+            show_terminal: false,
         };
         if let Ok(cwd) = std::env::current_dir() {
             app.lsp.set_workspace_root(cwd.clone());
@@ -138,7 +143,30 @@ impl CodeEditorApp {
             if i.consume_key(ctrl | Modifiers::SHIFT, Key::Space) {
                 self.action_trigger_signature_help();
             }
+            if i.consume_key(ctrl, Key::Backtick) {
+                self.action_toggle_terminal();
+            }
         });
+    }
+
+    pub fn action_toggle_terminal(&mut self) {
+        if self.show_terminal && self.terminal.is_some() {
+            self.show_terminal = false;
+            return;
+        }
+        if self.terminal.is_none() {
+            match Terminal::spawn() {
+                Ok(t) => self.terminal = Some(t),
+                Err(e) => {
+                    self.status_message = format!("Terminal failed: {e}");
+                    return;
+                }
+            }
+        }
+        self.show_terminal = true;
+        if let Some(t) = self.terminal.as_mut() {
+            t.focus_input = true;
+        }
     }
 
     pub fn action_trigger_completion(&mut self, trigger: Option<char>) {
@@ -837,6 +865,10 @@ impl eframe::App for CodeEditorApp {
                     {
                         ui.close_menu();
                     }
+                    if ui.button("Toggle Terminal  Ctrl+`").clicked() {
+                        self.action_toggle_terminal();
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Edit", |ui| {
                     if ui.button("Find  Ctrl+F").clicked() {
@@ -916,6 +948,17 @@ impl eframe::App for CodeEditorApp {
                 });
             });
         });
+
+        if self.show_terminal && self.terminal.is_some() {
+            egui::TopBottomPanel::bottom("terminal_panel")
+                .resizable(true)
+                .default_height(260.0)
+                .show(ctx, |ui| {
+                    if let Some(t) = self.terminal.as_mut() {
+                        t.show(ui);
+                    }
+                });
+        }
 
         if self.show_problems {
             egui::TopBottomPanel::bottom("problems_panel")

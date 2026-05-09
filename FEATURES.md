@@ -84,8 +84,10 @@ Status legend: `[x]` done · `[~]` partial · `[ ]` not yet
 - [ ] Status indicators in gutter (deferred — bundling with LSP gutter)
 
 ## Terminal & Tasks
-- [ ] Integrated terminal (PTY)
+- [x] Integrated terminal (PTY) — Ctrl+`, line-based input
 - [ ] Multiple terminals / split
+- [ ] Full ANSI rendering (currently strips colors / cursor moves)
+- [ ] Pass-through Ctrl+C / Tab / arrows to PTY
 - [ ] Tasks (`tasks.json`-style runners)
 - [ ] Build/run/test buttons
 - [ ] Problems panel parsing compiler output
@@ -100,10 +102,11 @@ Status legend: `[x]` done · `[~]` partial · `[ ]` not yet
 ## UI / UX
 - [x] Menu bar
 - [x] Status bar (cursor pos, language, branch, error/warning counts)
-- [x] Sidebar panels (Explorer / Source Control switcher)
+- [x] Sidebar panels (Explorer / Source Control / Search switcher)
 - [x] Bottom panel: Problems (toggle Ctrl+Shift+M)
+- [x] Bottom panel: Terminal (toggle Ctrl+`)
 - [ ] Activity bar (left rail icons)
-- [ ] Bottom panel: terminal / output
+- [ ] Output channels per provider
 - [ ] Command palette
 - [ ] Notifications / toasts
 - [ ] Keyboard shortcut customization

@@ -21,6 +21,7 @@ mod problems;
 mod scm;
 mod search;
 mod tabs;
+mod terminal;
 
 use app::CodeEditorApp;
 

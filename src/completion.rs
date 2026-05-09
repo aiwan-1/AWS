@@ -79,14 +79,10 @@ impl CompletionState {
         // Handle keyboard navigation BEFORE the area renders so it
         // intercepts arrows/enter/esc even when focus is in the editor.
         ctx.input_mut(|i| {
-            if i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
-                && !self.filtered.is_empty()
-            {
+            if i.consume_key(egui::Modifiers::NONE, Key::ArrowDown) && !self.filtered.is_empty() {
                 self.selected = (self.selected + 1) % self.filtered.len();
             }
-            if i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
-                && !self.filtered.is_empty()
-            {
+            if i.consume_key(egui::Modifiers::NONE, Key::ArrowUp) && !self.filtered.is_empty() {
                 self.selected = if self.selected == 0 {
                     self.filtered.len() - 1
                 } else {
