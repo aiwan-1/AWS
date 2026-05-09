@@ -14,6 +14,8 @@ mod app;
 mod editor;
 mod explorer;
 mod git;
+mod lsp;
+mod problems;
 mod scm;
 mod tabs;
 

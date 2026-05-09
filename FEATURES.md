@@ -50,14 +50,17 @@ Status legend: `[x]` done · `[~]` partial · `[ ]` not yet
 - [ ] Outline / symbols panel
 
 ## Code Intelligence (LSP)
-- [ ] LSP client framework
+- [x] LSP client framework (JSON-RPC over stdio, threaded reader)
+- [x] Diagnostics (errors, warnings, info, hints) with Problems panel
+- [x] Server registry: rust-analyzer, pylsp, typescript-language-server, gopls, clangd
+- [x] didOpen / didChange / didSave / didClose lifecycle
 - [ ] Autocomplete / IntelliSense
 - [ ] Hover info / signature help
-- [ ] Diagnostics (errors, warnings, hints)
 - [ ] Quick fixes / code actions
 - [ ] Refactoring (rename symbol, extract, etc.)
 - [ ] Format document / format on save
 - [ ] Snippets
+- [ ] Go to definition / references
 
 ## Search
 - [ ] Find / replace in current file (with regex)
@@ -93,10 +96,11 @@ Status legend: `[x]` done · `[~]` partial · `[ ]` not yet
 
 ## UI / UX
 - [x] Menu bar
-- [x] Status bar (cursor pos, language, branch)
+- [x] Status bar (cursor pos, language, branch, error/warning counts)
 - [x] Sidebar panels (Explorer / Source Control switcher)
+- [x] Bottom panel: Problems (toggle Ctrl+Shift+M)
 - [ ] Activity bar (left rail icons)
-- [ ] Bottom panel (terminal/problems/output)
+- [ ] Bottom panel: terminal / output
 - [ ] Command palette
 - [ ] Notifications / toasts
 - [ ] Keyboard shortcut customization

@@ -6,6 +6,8 @@ use egui::{Context, Key, Modifiers};
 use crate::editor::EditorView;
 use crate::explorer::FileExplorer;
 use crate::git::GitRepo;
+use crate::lsp::LspManager;
+use crate::problems::{self, ProblemAction};
 use crate::scm::{ScmAction, ScmState};
 use crate::tabs::{OpenFile, TabBar};
 
@@ -26,6 +28,8 @@ pub struct CodeEditorApp {
     pub blame_open: bool,
     pub blame_title: String,
     pub blame_text: String,
+    pub lsp: LspManager,
+    pub show_problems: bool,
 }
 
 impl CodeEditorApp {
@@ -41,8 +45,11 @@ impl CodeEditorApp {
             blame_open: false,
             blame_title: String::new(),
             blame_text: String::new(),
+            lsp: LspManager::new(),
+            show_problems: false,
         };
         if let Ok(cwd) = std::env::current_dir() {
+            app.lsp.set_workspace_root(cwd.clone());
             app.open_git(&cwd);
         }
         app
@@ -77,6 +84,9 @@ impl CodeEditorApp {
                 self.show_side_panel = true;
                 self.side_view = SidePanelView::SourceControl;
             }
+            if i.consume_key(ctrl | Modifiers::SHIFT, Key::M) {
+                self.show_problems = !self.show_problems;
+            }
         });
     }
 
@@ -94,14 +104,22 @@ impl CodeEditorApp {
     pub fn action_open_folder(&mut self) {
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
             self.explorer.set_root(path.clone());
+            self.lsp.set_workspace_root(path.clone());
             self.open_git(&path);
             self.status_message = format!("Opened folder {}", path.display());
         }
     }
 
     pub fn action_save(&mut self) {
-        match self.tabs.save_active() {
-            Ok(Some(path)) => self.status_message = format!("Saved {}", path.display()),
+        let saved = self.tabs.save_active();
+        match saved {
+            Ok(Some(path)) => {
+                self.status_message = format!("Saved {}", path.display());
+                if let Some(file) = self.tabs.active() {
+                    let content = file.content.clone();
+                    self.lsp.save_doc(&path, &content);
+                }
+            }
             Ok(None) => self.action_save_as(),
             Err(e) => self.status_message = format!("Save failed: {e}"),
         }
@@ -111,7 +129,13 @@ impl CodeEditorApp {
     pub fn action_save_as(&mut self) {
         if let Some(path) = rfd::FileDialog::new().save_file() {
             match self.tabs.save_active_as(&path) {
-                Ok(()) => self.status_message = format!("Saved {}", path.display()),
+                Ok(()) => {
+                    self.status_message = format!("Saved {}", path.display());
+                    if let Some(file) = self.tabs.active() {
+                        let content = file.content.clone();
+                        self.lsp.save_doc(&path, &content);
+                    }
+                }
                 Err(e) => self.status_message = format!("Save failed: {e}"),
             }
             self.refresh_scm();
@@ -119,17 +143,60 @@ impl CodeEditorApp {
     }
 
     pub fn action_close_active(&mut self) {
+        if let Some(file) = self.tabs.active() {
+            if let Some(path) = &file.path {
+                let p = path.clone();
+                self.lsp.close_doc(&p);
+            }
+        }
         self.tabs.close_active();
     }
 
     pub fn open_path(&mut self, path: PathBuf) {
         match OpenFile::from_path(&path) {
             Ok(file) => {
+                let content = file.content.clone();
                 self.tabs.add_file(file);
+                self.lsp.open_doc(&path, &content);
+                if let Some(active) = self.tabs.active_mut() {
+                    active.lsp_known_path = Some(path.clone());
+                    active.lsp_synced_version = active.content_version;
+                }
                 self.status_message = format!("Opened {}", path.display());
             }
             Err(e) => self.status_message = format!("Open failed: {e}"),
         }
+    }
+
+    fn sync_lsp_documents(&mut self) {
+        let mut changes: Vec<(PathBuf, String)> = Vec::new();
+        for file in self.tabs.files.iter_mut() {
+            if let Some(path) = &file.path {
+                if file.content_version != file.lsp_synced_version {
+                    file.lsp_synced_version = file.content_version;
+                    changes.push((path.clone(), file.content.clone()));
+                }
+            }
+        }
+        for (path, content) in changes {
+            self.lsp.change_doc(&path, &content);
+        }
+    }
+
+    fn jump_to(&mut self, path: PathBuf, line: u32) {
+        let already_open = self
+            .tabs
+            .files
+            .iter()
+            .position(|f| f.path.as_deref() == Some(path.as_path()));
+        match already_open {
+            Some(idx) => self.tabs.active = Some(idx),
+            None => self.open_path(path.clone()),
+        }
+        if let Some(file) = self.tabs.active_mut() {
+            file.goto_line = Some(line);
+        }
+        self.status_message = format!("{}:{}", path.display(), line);
     }
 
     pub fn open_git(&mut self, path: &Path) {
@@ -331,6 +398,9 @@ impl CodeEditorApp {
 impl eframe::App for CodeEditorApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.handle_shortcuts(ctx);
+        self.lsp.poll();
+        self.sync_lsp_documents();
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -382,6 +452,13 @@ impl eframe::App for CodeEditorApp {
                         self.side_view = SidePanelView::SourceControl;
                         ui.close_menu();
                     }
+                    ui.separator();
+                    if ui
+                        .checkbox(&mut self.show_problems, "Problems  Ctrl+Shift+M")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     ui.label("Rust Code Editor");
@@ -394,6 +471,12 @@ impl eframe::App for CodeEditorApp {
             ui.horizontal(|ui| {
                 if let Some(git) = &self.git {
                     ui.label(format!("⎇ {}", git.current_branch()));
+                    ui.separator();
+                }
+                let (errs, warns) = self.lsp.total_count();
+                if errs + warns > 0 {
+                    ui.colored_label(egui::Color32::from_rgb(255, 120, 120), format!("✗ {errs}"));
+                    ui.colored_label(egui::Color32::from_rgb(230, 200, 100), format!("⚠ {warns}"));
                     ui.separator();
                 }
                 ui.label(&self.status_message);
@@ -410,6 +493,19 @@ impl eframe::App for CodeEditorApp {
                 });
             });
         });
+
+        if self.show_problems {
+            egui::TopBottomPanel::bottom("problems_panel")
+                .resizable(true)
+                .default_height(220.0)
+                .show(ctx, |ui| {
+                    if let Some(action) = problems::show(ui, &self.lsp) {
+                        match action {
+                            ProblemAction::Open(path, line) => self.jump_to(path, line),
+                        }
+                    }
+                });
+        }
 
         if self.show_side_panel {
             egui::SidePanel::left("side_panel")

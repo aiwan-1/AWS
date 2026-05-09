@@ -37,6 +37,34 @@ impl EditorView {
                         .layouter(&mut layouter),
                 );
 
+                if response.changed() {
+                    file.content_version = file.content_version.wrapping_add(1);
+                }
+
+                if let Some(target_line) = file.goto_line.take() {
+                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+                        let target = target_line.saturating_sub(1) as usize;
+                        let mut idx = 0usize;
+                        let mut line = 0usize;
+                        for (i, ch) in file.content.char_indices() {
+                            if line == target {
+                                idx = i;
+                                break;
+                            }
+                            if ch == '\n' {
+                                line += 1;
+                            }
+                            idx = i + ch.len_utf8();
+                        }
+                        let cursor = egui::text::CCursor::new(file.content[..idx].chars().count());
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+                        state.store(ui.ctx(), response.id);
+                        response.request_focus();
+                    }
+                }
+
                 if response.has_focus() {
                     if let Some(state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
                         if let Some(range) = state.cursor.char_range() {
