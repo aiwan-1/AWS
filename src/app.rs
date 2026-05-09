@@ -1,27 +1,45 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::CreationContext;
 use egui::{Context, Key, Modifiers};
 
 use crate::editor::EditorView;
 use crate::explorer::FileExplorer;
+use crate::git::GitRepo;
+use crate::scm::{ScmAction, ScmState};
 use crate::tabs::{OpenFile, TabBar};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SidePanelView {
+    Explorer,
+    SourceControl,
+}
 
 pub struct CodeEditorApp {
     pub explorer: FileExplorer,
     pub tabs: TabBar,
     pub status_message: String,
-    pub show_explorer: bool,
+    pub show_side_panel: bool,
+    pub side_view: SidePanelView,
+    pub git: Option<GitRepo>,
+    pub scm: ScmState,
 }
 
 impl CodeEditorApp {
     pub fn new(_cc: &CreationContext<'_>) -> Self {
-        Self {
+        let mut app = Self {
             explorer: FileExplorer::new(),
             tabs: TabBar::default(),
             status_message: String::from("Ready"),
-            show_explorer: true,
+            show_side_panel: true,
+            side_view: SidePanelView::Explorer,
+            git: None,
+            scm: ScmState::default(),
+        };
+        if let Ok(cwd) = std::env::current_dir() {
+            app.open_git(&cwd);
         }
+        app
     }
 
     fn handle_shortcuts(&mut self, ctx: &Context) {
@@ -43,7 +61,15 @@ impl CodeEditorApp {
                 self.action_close_active();
             }
             if i.consume_key(ctrl, Key::B) {
-                self.show_explorer = !self.show_explorer;
+                self.show_side_panel = !self.show_side_panel;
+            }
+            if i.consume_key(ctrl | Modifiers::SHIFT, Key::E) {
+                self.show_side_panel = true;
+                self.side_view = SidePanelView::Explorer;
+            }
+            if i.consume_key(ctrl | Modifiers::SHIFT, Key::G) {
+                self.show_side_panel = true;
+                self.side_view = SidePanelView::SourceControl;
             }
         });
     }
@@ -62,6 +88,7 @@ impl CodeEditorApp {
     pub fn action_open_folder(&mut self) {
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
             self.explorer.set_root(path.clone());
+            self.open_git(&path);
             self.status_message = format!("Opened folder {}", path.display());
         }
     }
@@ -72,6 +99,7 @@ impl CodeEditorApp {
             Ok(None) => self.action_save_as(),
             Err(e) => self.status_message = format!("Save failed: {e}"),
         }
+        self.refresh_scm();
     }
 
     pub fn action_save_as(&mut self) {
@@ -80,6 +108,7 @@ impl CodeEditorApp {
                 Ok(()) => self.status_message = format!("Saved {}", path.display()),
                 Err(e) => self.status_message = format!("Save failed: {e}"),
             }
+            self.refresh_scm();
         }
     }
 
@@ -95,6 +124,125 @@ impl CodeEditorApp {
             }
             Err(e) => self.status_message = format!("Open failed: {e}"),
         }
+    }
+
+    pub fn open_git(&mut self, path: &Path) {
+        self.git = GitRepo::open(path);
+        self.scm = ScmState::default();
+        self.refresh_scm();
+    }
+
+    pub fn refresh_scm(&mut self) {
+        let Some(git) = &self.git else {
+            self.scm.statuses.clear();
+            return;
+        };
+        match git.statuses() {
+            Ok(s) => {
+                self.scm.statuses = s;
+                self.scm.last_error = None;
+            }
+            Err(e) => self.scm.last_error = Some(e.to_string()),
+        }
+    }
+
+    fn handle_scm_action(&mut self, action: ScmAction) {
+        let Some(git) = &self.git else { return };
+        self.scm.last_info = None;
+        match action {
+            ScmAction::Refresh => self.refresh_scm(),
+            ScmAction::Stage(p) => {
+                match git.stage(&p) {
+                    Ok(()) => self.scm.last_error = None,
+                    Err(e) => self.scm.last_error = Some(e.to_string()),
+                }
+                self.refresh_scm();
+            }
+            ScmAction::Unstage(p) => {
+                match git.unstage(&p) {
+                    Ok(()) => self.scm.last_error = None,
+                    Err(e) => self.scm.last_error = Some(e.to_string()),
+                }
+                self.refresh_scm();
+            }
+            ScmAction::Discard(p) => {
+                let entry = self
+                    .scm
+                    .statuses
+                    .iter()
+                    .find(|e| !e.staged && e.path == p)
+                    .cloned();
+                let res = match entry {
+                    Some(e) => git.discard(&e),
+                    None => Err("entry not found".into()),
+                };
+                match res {
+                    Ok(()) => {
+                        self.scm.last_error = None;
+                        self.status_message = format!("Discarded {p}");
+                    }
+                    Err(e) => self.scm.last_error = Some(e),
+                }
+                self.refresh_scm();
+            }
+            ScmAction::Select(path, staged) => {
+                self.scm.selected = Some((path.clone(), staged));
+                match git.diff_for(&path, staged) {
+                    Ok(d) => {
+                        self.scm.diff = d;
+                        self.scm.last_error = None;
+                    }
+                    Err(e) => {
+                        self.scm.diff.clear();
+                        self.scm.last_error = Some(e.to_string());
+                    }
+                }
+            }
+            ScmAction::Commit => {
+                let msg = self.scm.commit_message.trim().to_string();
+                if msg.is_empty() {
+                    self.scm.last_error = Some("Commit message is empty.".into());
+                    return;
+                }
+                match git.commit(&msg) {
+                    Ok(oid) => {
+                        let short = oid.to_string();
+                        let short = &short[..short.len().min(8)];
+                        self.status_message = format!("Committed {short}");
+                        self.scm.commit_message.clear();
+                        self.scm.last_error = None;
+                        self.scm.last_info = Some(format!("Committed {short}"));
+                    }
+                    Err(e) => self.scm.last_error = Some(e.to_string()),
+                }
+                self.refresh_scm();
+            }
+            ScmAction::Push => self.run_remote_op("push"),
+            ScmAction::Pull => self.run_remote_op("pull"),
+            ScmAction::Fetch => self.run_remote_op("fetch"),
+        }
+    }
+
+    fn run_remote_op(&mut self, op: &str) {
+        let Some(git) = &self.git else { return };
+        let res = match op {
+            "push" => git.push(),
+            "pull" => git.pull(),
+            "fetch" => git.fetch(),
+            _ => return,
+        };
+        match res {
+            Ok(out) => {
+                self.scm.last_error = None;
+                self.scm.last_info = Some(format!("git {op}:\n{}", out.trim()));
+                self.status_message = format!("git {op} ok");
+            }
+            Err(e) => {
+                self.scm.last_info = None;
+                self.scm.last_error = Some(format!("git {op}: {e}"));
+            }
+        }
+        self.refresh_scm();
     }
 }
 
@@ -137,9 +285,19 @@ impl eframe::App for CodeEditorApp {
                 });
                 ui.menu_button("View", |ui| {
                     if ui
-                        .checkbox(&mut self.show_explorer, "Explorer  Ctrl+B")
+                        .checkbox(&mut self.show_side_panel, "Side Panel  Ctrl+B")
                         .clicked()
                     {
+                        ui.close_menu();
+                    }
+                    if ui.button("Explorer  Ctrl+Shift+E").clicked() {
+                        self.show_side_panel = true;
+                        self.side_view = SidePanelView::Explorer;
+                        ui.close_menu();
+                    }
+                    if ui.button("Source Control  Ctrl+Shift+G").clicked() {
+                        self.show_side_panel = true;
+                        self.side_view = SidePanelView::SourceControl;
                         ui.close_menu();
                     }
                 });
@@ -152,6 +310,10 @@ impl eframe::App for CodeEditorApp {
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                if let Some(git) = &self.git {
+                    ui.label(format!("⎇ {}", git.current_branch()));
+                    ui.separator();
+                }
                 ui.label(&self.status_message);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(file) = self.tabs.active() {
@@ -167,17 +329,45 @@ impl eframe::App for CodeEditorApp {
             });
         });
 
-        if self.show_explorer {
-            egui::SidePanel::left("explorer")
+        if self.show_side_panel {
+            egui::SidePanel::left("side_panel")
                 .resizable(true)
-                .default_width(220.0)
-                .min_width(140.0)
+                .default_width(280.0)
+                .min_width(180.0)
                 .show(ctx, |ui| {
-                    ui.heading("Explorer");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(
+                                self.side_view == SidePanelView::Explorer,
+                                "🗂 Explorer",
+                            )
+                            .clicked()
+                        {
+                            self.side_view = SidePanelView::Explorer;
+                        }
+                        if ui
+                            .selectable_label(
+                                self.side_view == SidePanelView::SourceControl,
+                                "⎇ Source Control",
+                            )
+                            .clicked()
+                        {
+                            self.side_view = SidePanelView::SourceControl;
+                            self.refresh_scm();
+                        }
+                    });
                     ui.separator();
-                    let to_open = self.explorer.show(ui);
-                    if let Some(path) = to_open {
-                        self.open_path(path);
+                    match self.side_view {
+                        SidePanelView::Explorer => {
+                            if let Some(path) = self.explorer.show(ui) {
+                                self.open_path(path);
+                            }
+                        }
+                        SidePanelView::SourceControl => {
+                            if let Some(action) = self.scm.show(ui, self.git.as_ref()) {
+                                self.handle_scm_action(action);
+                            }
+                        }
                     }
                 });
         }

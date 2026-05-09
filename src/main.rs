@@ -13,6 +13,8 @@
 mod app;
 mod editor;
 mod explorer;
+mod git;
+mod scm;
 mod tabs;
 
 use app::CodeEditorApp;
